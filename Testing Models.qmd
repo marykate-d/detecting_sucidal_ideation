@@ -1,0 +1,691 @@
+---
+title: "Machine Learning Model Comparison"
+subtitle: "Detecting Suicidal Ideation"
+author: "MK Durka"
+format: html
+highlight-style: breezedark
+---
+
+## Set Up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(haven)
+library(tidyr)
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+library(knitr)
+library(yardstick)
+library(discrim)
+library(hutils)
+library(DALEX)
+library(DALEXtra)
+library(themis)
+library(paletteer)
+library(ggsci)
+
+# Use in a ggplot2 chart:
+scale_colour_paletteer_d("MoMAColors::Althoff")
+scale_fill_paletteer_d("MoMAColors::Althoff")
+
+```
+
+
+
+```{r read_data}
+#Note, data is not posted for privacy reasons
+data <- read_sav("data.sav")
+```
+
+Creating the outcome variable (the presence of suicidal ideation) as a dichotomous variable for use in classification models. 
+
+```{r nn-mod-code-bdi-ten}
+sas_data <-data %>% 
+  mutate(suicidal = case_when(
+    BDI_9 == 0 ~ 0,
+    is.na(BDI_9) ~ NA,
+    .default = 1),
+  suicidal_string = factor(suicidal, levels = c(0, 1), labels = c("No", "Yes"))) %>% 
+  filter(!is.na(suicidal_string))
+#  filter(!is.na(suicidal), !is.na(BDI_total), !is.na(DERS_total), !is.na(NMR_total),
+ #        !is.na(IHNI_personhomoneg), !is.na(STAI_total)) #%>% 
+   #select(BDI_10, suicidal, suicidal_string)
+```
+
+I started building my models by utilizing feature selection. I included all variables of interest in a basic random forest classification model and kept the top 10 most predictive features to use in the main analysis. 
+
+```{r}
+sas_data <- sas_data %>% 
+  select(BDI_total, ## Beck Depression Inventory
+         DERS_total, ## Difficulties in Emotion Regulation Scale
+         PNAS_positive, ## Positive and Negative Affect Scale, positive subscale
+         PNAS_negative, ## Positive and Negative Affect Scale, negative subscale
+         Sex_Ort, ## Participant's sexual orientation
+         NMR_total, ## Negative Mood Regulation
+         IHNI_personhomoneg,  ## Internalized Homonegativity Inventory, personal homonegativity subscale
+         IHNI_gayaffirm, ## Internalized Homonegativity Inventory, gay affermation subscale
+         IHNI_moralhomosex, ## Internalized Homonegativity Inventory, morality of homosexuality subscale
+         SOCQ_total, ## Sexual Orientation Concealment Questionnaire 
+         SCQ_total, ## Stigma Consciousness Questionnaire 
+         STAI_total, ## State-Trait Anxiety Inventory
+         PSS_total, ## Percieved Stress Scale 
+         RSCM_total, ## Religion-Sexuality Conflict Measure
+         ECR_anxiety_total, ## Experiences in Close Relationships, anxious attachment subscale
+         ECR_avoidance_total, ## Experiences in Close Relationships, avoidant attachment subscale
+         suicidal_string, ## outcome variable, string format
+         suicidal ## outcome variable, coded format: 0, 1 
+  )
+
+```
+
+```{r}
+sas_data %>% 
+  count(suicidal)
+```
+
+## Splitting Data
+
+Before any action was taken, however, I set aside the testing data, and stratified to account for the imbalanced outcome variable. 
+
+```{r}
+set.seed(123)
+
+split <- initial_split(sas_data, prop = .75, strata = suicidal)
+train <- training(split)
+test  <- testing(split)
+
+#1:
+set.seed(123)
+folds <- vfold_cv(train, v=5, strata=suicidal_string)
+
+```
+
+
+## Feature Engineering 
+
+```{r}
+rf_mod <- rand_forest(mode = "classification") %>% 
+  set_engine("randomForest")
+```
+
+```{r}
+fe_rec <- recipe(suicidal ~ ., data = train) %>% 
+  step_mutate(suicidal = as.factor(suicidal)) %>% 
+  step_rm(suicidal_string) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_impute_mean(all_numeric()) %>% 
+  step_impute_median(all_nominal_predictors())
+```
+
+```{r}
+rf_wflow <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(fe_rec)
+
+rf_fit_rs <- rf_wflow %>% 
+  fit_resamples(folds)
+
+rf_fit <- rf_wflow %>% 
+  fit(train)
+```
+
+```{r}
+collect_metrics(rf_fit_rs)
+```
+
+```{r eval=FALSE}
+augment(rf_fit, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+```{r eval=FALSE}
+rf_fit %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) 
+```
+
+```{r eval=FALSE}
+explainer_rf <- make_explainer_obj(rf_fit)
+vip_res <- model_parts(explainer_rf) 
+ggplot_imp(vip_res) +
+  theme_minimal()
+```
+
+## Recipe
+
+The same recipe will be used for all models. This includes the top ten most predictive variables, dummy coding nominal variables, imputing mean values for missing numeric values, and imputing medians for missing nominal variables. 
+
+```{r, echo=FALSE}
+rec <- recipe(suicidal_string ~
+                      
+                      BDI_total +        ##
+                      DERS_total +
+                    #  PNAS_positive + 
+                      PNAS_negative +
+                    #  Sex_Ort,
+                      NMR_total +
+                      IHNI_personhomoneg +
+                    #  IHNI_gayaffirm +
+                    #  IHNI_moralhomosex +
+                      SOCQ_total +
+                      SCQ_total +
+                      STAI_total +       ##
+                      PSS_total +
+                    #  RSCM_total,
+                    #  ECR_anxiety_total +
+                      ECR_avoidance_total,
+                        data = train) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_impute_mean(all_numeric()) %>% 
+  step_impute_median(all_nominal_predictors())
+
+```
+
+## Logistic Regression Model
+
+Creation of the basic logistic regression model. 
+
+```{r}
+log_spec <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+```
+
+```{r, echo=FALSE}
+log_wflow <- workflow() %>%
+    add_recipe(rec) %>%
+  add_model(log_spec)
+
+log_fit <- log_wflow %>%      # now fit to training data 
+  fit(data = train) 
+```
+
+```{r}
+augment(log_fit, new_data = train) %>%
+  select(-c(BDI_total:ECR_avoidance_total))
+```
+
+**Fit 1 Metrics (Training) for all 5 folds**
+```{r, echo=FALSE}
+
+#2:
+log_fit_rs <- fit_resamples(log_wflow, folds) 
+  
+#3:
+collect_metrics(log_fit_rs, summarize = FALSE)
+
+#4
+collect_metrics(log_fit_rs)
+```
+
+```{r}
+augment(log_fit, new_data = train) %>% 
+  roc_curve(truth = suicidal_string, .pred_No) %>%
+  autoplot() +
+  labs(x="FPR, 1-specificity", y="TPR, or sensitivity",
+              title="SAS Fit 1 (Training)")
+```
+
+Validating model performance on the testing data:
+
+```{r}
+augment(log_fit, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+```{r}
+class_metrics <- metric_set(bal_accuracy)
+
+log_bal <- log_fit %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Logistic Regression")
+log_bal
+```
+
+
+## Random Forest Model
+
+Creating basic random forest model:
+
+```{r}
+rf_mod <- rand_forest(mode = "classification") %>% 
+  set_engine("randomForest")
+```
+
+```{r}
+rf_wflow <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(rec)
+
+rf_fit <- rf_wflow %>% 
+  fit(train)
+
+rf_fit_rs <- rf_wflow %>% 
+  fit_resamples(resamples = folds)
+```
+
+```{r}
+collect_metrics(rf_fit_rs)
+```
+
+Validating model performance on testing data:
+
+```{r}
+augment(rf_fit, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+```{r}
+rf_bal <- rf_fit %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Random Forest")
+rf_bal
+```
+
+## Naive Bayes
+
+Creating basic naive bayes model:
+
+```{r}
+nb_spec <- naive_Bayes(
+  mode = "classification", 
+  engine = "naivebayes"
+  )
+```
+
+```{r}
+nb_wflow <- workflow() %>% 
+  add_model(nb_spec) %>% 
+  add_recipe(rec)
+
+nb_fit <- nb_wflow %>% 
+  fit(train)
+```
+
+```{r}
+nb_fit_rs <- nb_wflow %>% 
+  fit_resamples(resamples = folds)
+```
+
+```{r}
+augment(nb_fit, new_data = train) %>% 
+  roc_curve(truth = suicidal_string, .pred_No) %>%
+  autoplot() +
+  labs(x="FPR, 1-specificity", y="TPR, or sensitivity",
+              title="SAS Fit 1 (Training)")
+```
+
+Validating model performance on testing data:
+
+```{r}
+augment(nb_fit, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+```{r}
+collect_metrics(rf_fit_rs)
+```
+
+```{r}
+nb_bal <- nb_fit %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Naive Bayes")
+nb_bal
+```
+
+## Boosted Tree
+
+Creating basic boosed tree model:
+
+```{r}
+boost_spec <- boost_tree(mode = "classification") %>% 
+  set_engine("xgboost")
+```
+
+```{r}
+boost_wflow <- workflow() %>% 
+  add_model(boost_spec) %>% 
+  add_recipe(rec)
+```
+
+```{r}
+boost_fit <- boost_wflow %>% 
+  fit(train)
+```
+
+
+```{r}
+boost_fit_rs <- boost_wflow %>% 
+  fit_resamples(resamples = folds)
+```
+
+```{r}
+augment(boost_fit, new_data = train) %>% 
+  roc_curve(truth = suicidal_string, .pred_No) %>%
+  autoplot() +
+  labs(x="FPR, 1-specificity", y="TPR, or sensitivity",
+              title="SAS Fit 1 (Training)")
+```
+
+Validating model performance on test data:
+
+```{r}
+augment(boost_fit, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+```{r}
+collect_metrics(boost_fit_rs)
+```
+
+```{r}
+boost_bal <- boost_fit %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Boosted Tree")
+boost_bal
+```
+
+## Tuning Hyperparameters
+
+Tuning all models:
+
+```{r}
+rf_mod <- rand_forest(mode = "classification", mtry = tune()) %>% 
+  set_engine("randomForest")
+
+boost_mod <- boost_tree(mode = "classification", trees = tune(), learn_rate = tune()) %>% 
+  set_engine("xgboost")
+
+nb_mod <- naive_Bayes(mode = "classification", engine = "naivebayes", 
+                      smoothness = tune(), Laplace = tune())
+
+log_mod <- logistic_reg(mode = "classification", engine = "glmnet",
+                    penalty = tune(), mixture = tune())
+```
+
+```{r}
+wflows_tuned <- workflow_set(
+  preproc = list(base = rec),
+  models = list(rf = rf_mod, boost = boost_mod, log = log_mod, nb = nb_mod)
+)
+```
+
+
+```{r}
+rs_fit_tuned <- workflow_map(
+  wflows_tuned,
+  resamples = folds,
+  fn = "tune_race_anova",
+  grid = 10,
+  control = control_race(save_workflow = TRUE)
+) 
+
+metrics <- collect_metrics(rs_fit_tuned) %>% 
+  select(wflow_id, .metric, mean, std_err) %>% 
+  arrange(.metric, -mean)
+```
+
+
+```{r}
+autoplot(rs_fit_tuned) +
+  theme_minimal() + 
+  scale_color_brewer(palette = "Dark2")
+```
+
+### pulling tuned naive bayes model metrics
+
+```{r warning=FALSE, message=FALSE}
+best_mod <- rs_fit_tuned %>% 
+  extract_workflow_set_result("base_nb") %>% 
+  select_best() 
+
+final_wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_mod) %>% 
+  finalize_workflow(best_mod)
+
+final_fit_nb <- final_wf %>% 
+  fit(train)
+
+#final_fit_rs <- final_wf %>% 
+ # fit_resamples(resamples = folds)
+
+final_fit_rs <- final_wf %>% 
+  tune_grid(
+    resamples = folds
+  )
+
+final_fit_nb %>% 
+  augment(test) %>% 
+  metrics(truth = suicidal_string, estimate = .pred_class)
+
+```
+
+```{r}
+augment(final_fit_nb, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+```{r}
+collect_metrics(final_fit_rs)
+```
+
+```{r}
+tuned_nb_bal <- final_fit_nb %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Tuned Naive Bayes")
+tuned_nb_bal
+```
+
+### pulling tuned logistic regression model metrics
+
+```{r warning=FALSE, message=FALSE}
+best_mod <- rs_fit_tuned %>% 
+  extract_workflow_set_result("base_log") %>% 
+  select_best() 
+
+final_wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_mod) %>% 
+  finalize_workflow(best_mod)
+
+final_fit_log <- final_wf %>% 
+  fit(train)
+
+#final_fit_rs <- final_wf %>% 
+ # fit_resamples(resamples = folds)
+
+final_fit_rs <- final_wf %>% 
+  tune_grid(
+    resamples = folds
+  )
+
+tuned_log_bal <- final_fit_log %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Tuned Logistic Regression")
+
+```
+
+### pulling tuned random forest model metrics
+
+```{r final_model, warning=FALSE, message=FALSE}
+best_mod <- rs_fit_tuned %>% 
+  extract_workflow_set_result("base_rf") %>% 
+  select_best() 
+
+final_wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_mod) %>% 
+  finalize_workflow(best_mod)
+
+final_fit_rf <- final_wf %>% 
+  fit(train)
+
+#final_fit_rs <- final_wf %>% 
+ # fit_resamples(resamples = folds)
+
+final_fit_rs <- final_wf %>% 
+  tune_grid(
+    resamples = folds
+  )
+
+tuned_rf_bal <- final_fit_rf %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Tuned Random Forest")
+
+```
+
+### pulling tuned boosted tree model metrics 
+
+```{r warning=FALSE, message=FALSE}
+best_mod <- rs_fit_tuned %>% 
+  extract_workflow_set_result("base_boost") %>% 
+  select_best() 
+
+final_wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_mod) %>% 
+  finalize_workflow(best_mod)
+
+final_fit_boost <- final_wf %>% 
+  fit(train)
+
+#final_fit_rs <- final_wf %>% 
+ # fit_resamples(resamples = folds)
+
+final_fit_rs <- final_wf %>% 
+  tune_grid(
+    resamples = folds
+  )
+
+tuned_boost_bal <- final_fit_boost %>% 
+  augment(test) %>% 
+  class_metrics(suicidal_string, estimate = .pred_class) %>% 
+  mutate(model = "Tuned Boosted Tree")
+
+```
+
+## Comparing models and creating visualization for metrics
+
+```{r}
+all_bal <- bind_rows(log_bal, rf_bal, nb_bal, boost_bal, tuned_boost_bal,
+                     tuned_log_bal, tuned_nb_bal, tuned_rf_bal) %>% 
+  select(model, .metric, .estimate) %>% 
+  arrange(-.estimate)
+```
+
+```{r}
+log_roc <- log_fit %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Logistic Regression")
+
+rf_roc <- rf_fit %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Random Forest")
+
+nb_roc <- nb_fit %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Naive Bayes")
+
+boost_roc <- boost_fit %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Boosted Tree")
+
+tuned_roc_nb <- final_fit_nb %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Tuned Naive Bayes")
+
+tuned_roc_boost <- final_fit_boost %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Tuned Boosted Tree")
+
+tuned_roc_log <- final_fit_log %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Tuned Logistic Regression")
+
+tuned_roc_rf <- final_fit_rf %>% 
+  augment(test) %>% 
+  roc_auc(truth = suicidal_string, .pred_No) %>% 
+  mutate(model = "Tuned Random Forest")
+
+
+```
+
+```{r}
+all_roc <- bind_rows(log_roc, rf_roc, nb_roc, boost_roc, tuned_roc_boost,
+                     tuned_roc_log, tuned_roc_nb, tuned_roc_rf) %>% 
+  select(model, .metric, .estimate) %>% 
+  arrange(-.estimate)
+```
+
+```{r}
+all_metrics <- bind_rows(all_bal, all_roc)
+all_metrics %>% 
+  arrange(.metric,-.estimate)
+```
+
+```{r fig.height=5, fig.width=20}
+list <- c("Balanced Accuracy", "ROC ACU")
+
+all_metrics %>% 
+  ggplot(aes(x = model, y = .estimate, fill = .metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  scale_fill_manual(values = c("#B75375", "#6CA8CD"),
+                    labels = list) +
+  labs(
+    x = "Models Tested",
+    y = "Metric Estimate",
+    fill = "Metric"
+  ) +
+  theme(legend.position = "none", 
+        plot.background = element_rect(fill = "black"), 
+        panel.grid = element_line(linewidth = 0))
+```
+
+## Creating Confusion Matrixes 
+
+```{r}
+augment(nb_fit, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap") +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        plot.background = element_rect(fill = "black"),
+        panel.grid = element_line(linewidth = 0)) +
+  scale_fill_gradient(low = "#D9B1BC", high = "#A95974")
+```
+
+```{r}
+augment(log_fit, new_data = test) %>%
+  conf_mat(truth = suicidal_string, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap") +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        plot.background = element_rect(fill = "black"),
+        panel.grid = element_line(linewidth = 0)) +
+  scale_fill_gradient(low = "#D9B1BC", high = "#A95974")
+```
+
